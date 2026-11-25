@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+.aws/
+__pycache__/
+*.pyc
+.venv/
+evidence/
+deployment.json
+*.pem
+*.key

@@ -1,0 +1,249 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Course environment assignment developed with Codex: HTTP API, Lambda and DynamoDB",
+  "Resources": {
+    "Table": {
+      "Type": "AWS::DynamoDB::Table",
+      "Properties": {
+        "BillingMode": "PAY_PER_REQUEST",
+        "AttributeDefinitions": [
+          {
+            "AttributeName": "pk",
+            "AttributeType": "S"
+          }
+        ],
+        "KeySchema": [
+          {
+            "AttributeName": "pk",
+            "KeyType": "HASH"
+          }
+        ],
+        "SSESpecification": {
+          "SSEEnabled": true
+        },
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "aws-environment-app"
+          }
+        ]
+      }
+    },
+    "ExecutionRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "AppOnly",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "dynamodb:PutItem",
+                    "dynamodb:GetItem"
+                  ],
+                  "Resource": {
+                    "Fn::GetAtt": [
+                      "Table",
+                      "Arn"
+                    ]
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}:*"
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "LogGroup": {
+      "Type": "AWS::Logs::LogGroup",
+      "Properties": {
+        "LogGroupName": {
+          "Fn::Sub": "/aws/lambda/${AWS::StackName}"
+        },
+        "RetentionInDays": 7
+      }
+    },
+    "Function": {
+      "Type": "AWS::Lambda::Function",
+      "DependsOn": "LogGroup",
+      "Properties": {
+        "FunctionName": {
+          "Ref": "AWS::StackName"
+        },
+        "Runtime": "python3.12",
+        "Handler": "index.handler",
+        "Role": {
+          "Fn::GetAtt": [
+            "ExecutionRole",
+            "Arn"
+          ]
+        },
+        "MemorySize": 128,
+        "Timeout": 10,
+        "Environment": {
+          "Variables": {
+            "TABLE_NAME": {
+              "Ref": "Table"
+            }
+          }
+        },
+        "Code": {
+          "ZipFile": "\"\"\"Course assignment: Lambda health and DynamoDB integration checks.\"\"\"\nimport json\nimport logging\nimport os\nfrom datetime import datetime, timezone\n\nlogger = logging.getLogger()\nlogger.setLevel(logging.INFO)\n\n\ndef handler(event, context):\n    method = event.get(\"requestContext\", {}).get(\"http\", {}).get(\"method\", \"GET\")\n    path = event.get(\"rawPath\", \"/health\")\n    stage = event.get(\"requestContext\", {}).get(\"stage\", \"\")\n    if stage and stage != \"$default\" and path.startswith(\"/\" + stage + \"/\"):\n        path = path[len(stage) + 1:]\n    request_id = getattr(context, \"aws_request_id\", \"local\")\n    status = 200\n    body = {\"status\": \"ok\", \"service\": \"aws-environment-app\", \"developer_tool\": \"Codex\"}\n    if method != \"GET\" or path not in (\"/health\", \"/storage-check\"):\n        status, body = 404, {\"status\": \"error\", \"message\": \"Not found\"}\n    elif path == \"/storage-check\":\n        try:\n            import boto3\n            table = boto3.resource(\"dynamodb\").Table(os.environ[\"TABLE_NAME\"])\n            item = {\"pk\": \"environment-check\", \"checked_at\": datetime.now(timezone.utc).isoformat(), \"request_id\": request_id}\n            table.put_item(Item=item)\n            saved = table.get_item(Key={\"pk\": item[\"pk\"]}, ConsistentRead=True).get(\"Item\")\n            if saved != item:\n                raise RuntimeError(\"Storage verification mismatch\")\n            body.update(storage=\"ok\", write=\"ok\", read=\"ok\", item=saved)\n        except Exception:\n            logger.exception(\"Storage check failed request_id=%s\", request_id)\n            status, body = 503, {\"status\": \"error\", \"storage\": \"unavailable\", \"request_id\": request_id}\n    body[\"request_id\"] = request_id\n    logger.info(json.dumps({\"request_id\": request_id, \"path\": path, \"status\": status}))\n    return {\"statusCode\": status, \"headers\": {\"Content-Type\": \"application/json; charset=utf-8\", \"Cache-Control\": \"no-store\"}, \"body\": json.dumps(body, ensure_ascii=False)}\n"
+        }
+      }
+    },
+    "Api": {
+      "Type": "AWS::ApiGatewayV2::Api",
+      "Properties": {
+        "Name": {
+          "Ref": "AWS::StackName"
+        },
+        "ProtocolType": "HTTP"
+      }
+    },
+    "Integration": {
+      "Type": "AWS::ApiGatewayV2::Integration",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "IntegrationType": "AWS_PROXY",
+        "IntegrationUri": {
+          "Fn::GetAtt": [
+            "Function",
+            "Arn"
+          ]
+        },
+        "PayloadFormatVersion": "2.0"
+      }
+    },
+    "HealthRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "GET /health",
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "Integration"
+              }
+            ]
+          ]
+        }
+      }
+    },
+    "StorageRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "GET /storage-check",
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "Integration"
+              }
+            ]
+          ]
+        }
+      }
+    },
+    "Stage": {
+      "Type": "AWS::ApiGatewayV2::Stage",
+      "DependsOn": [
+        "HealthRoute",
+        "StorageRoute"
+      ],
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "StageName": "dev",
+        "AutoDeploy": true,
+        "DefaultRouteSettings": {
+          "ThrottlingBurstLimit": 2,
+          "ThrottlingRateLimit": 1
+        }
+      }
+    },
+    "InvokePermission": {
+      "Type": "AWS::Lambda::Permission",
+      "Properties": {
+        "FunctionName": {
+          "Ref": "Function"
+        },
+        "Action": "lambda:InvokeFunction",
+        "Principal": "apigateway.amazonaws.com",
+        "SourceArn": {
+          "Fn::Sub": "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/dev/GET/*"
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "ApiBaseUrl": {
+      "Value": {
+        "Fn::Sub": "https://${Api}.execute-api.${AWS::Region}.${AWS::URLSuffix}/dev"
+      }
+    },
+    "HealthUrl": {
+      "Value": {
+        "Fn::Sub": "https://${Api}.execute-api.${AWS::Region}.${AWS::URLSuffix}/dev/health"
+      }
+    },
+    "StorageCheckUrl": {
+      "Value": {
+        "Fn::Sub": "https://${Api}.execute-api.${AWS::Region}.${AWS::URLSuffix}/dev/storage-check"
+      }
+    },
+    "TableName": {
+      "Value": {
+        "Ref": "Table"
+      }
+    },
+    "FunctionName": {
+      "Value": {
+        "Ref": "Function"
+      }
+    },
+    "LogGroupName": {
+      "Value": {
+        "Ref": "LogGroup"
+      }
+    }
+  }
+}
