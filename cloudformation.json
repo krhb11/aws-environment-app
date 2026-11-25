@@ -1,6 +1,6 @@
 {
   "AWSTemplateFormatVersion": "2010-09-09",
-  "Description": "Course environment assignment developed with Codex: HTTP API, Lambda and DynamoDB",
+  "Description": "Book RAG AWS development environment only: private S3, CloudFront, S3 Vectors, API and Bedrock IAM",
   "Resources": {
     "Table": {
       "Type": "AWS::DynamoDB::Table",
@@ -72,6 +72,63 @@
                   "Resource": {
                     "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}:*"
                   }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "s3:GetBucketLocation",
+                  "Resource": [
+                    {
+                      "Fn::GetAtt": [
+                        "WebBucket",
+                        "Arn"
+                      ]
+                    },
+                    {
+                      "Fn::GetAtt": [
+                        "DataBucket",
+                        "Arn"
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "s3:GetObject",
+                  "Resource": [
+                    {
+                      "Fn::Sub": "${DataBucket.Arn}/raw/*"
+                    },
+                    {
+                      "Fn::Sub": "${DataBucket.Arn}/processed/*"
+                    }
+                  ]
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3vectors:GetIndex",
+                    "s3vectors:ListVectors",
+                    "s3vectors:GetVectors",
+                    "s3vectors:QueryVectors"
+                  ],
+                  "Resource": {
+                    "Ref": "VectorIndex"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "bedrock:InvokeModel",
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/apac.amazon.nova-micro-v1:0"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:bedrock:*::foundation-model/amazon.nova-micro-v1:0"
+                    }
+                  ]
                 }
               ]
             }
@@ -103,17 +160,28 @@
             "Arn"
           ]
         },
-        "MemorySize": 128,
-        "Timeout": 10,
+        "MemorySize": 256,
+        "Timeout": 20,
         "Environment": {
           "Variables": {
             "TABLE_NAME": {
               "Ref": "Table"
-            }
+            },
+            "WEB_BUCKET": {
+              "Ref": "WebBucket"
+            },
+            "DATA_BUCKET": {
+              "Ref": "DataBucket"
+            },
+            "VECTOR_INDEX_ARN": {
+              "Ref": "VectorIndex"
+            },
+            "EMBEDDING_MODEL": "amazon.titan-embed-text-v2:0",
+            "GENERATION_MODEL": "apac.amazon.nova-micro-v1:0"
           }
         },
         "Code": {
-          "ZipFile": "\"\"\"Course assignment: Lambda health and DynamoDB integration checks.\"\"\"\nimport json\nimport logging\nimport os\nfrom datetime import datetime, timezone\n\nlogger = logging.getLogger()\nlogger.setLevel(logging.INFO)\n\n\ndef handler(event, context):\n    method = event.get(\"requestContext\", {}).get(\"http\", {}).get(\"method\", \"GET\")\n    path = event.get(\"rawPath\", \"/health\")\n    stage = event.get(\"requestContext\", {}).get(\"stage\", \"\")\n    if stage and stage != \"$default\" and path.startswith(\"/\" + stage + \"/\"):\n        path = path[len(stage) + 1:]\n    request_id = getattr(context, \"aws_request_id\", \"local\")\n    status = 200\n    body = {\"status\": \"ok\", \"service\": \"aws-environment-app\", \"developer_tool\": \"Codex\"}\n    if method != \"GET\" or path not in (\"/health\", \"/storage-check\"):\n        status, body = 404, {\"status\": \"error\", \"message\": \"Not found\"}\n    elif path == \"/storage-check\":\n        try:\n            import boto3\n            table = boto3.resource(\"dynamodb\").Table(os.environ[\"TABLE_NAME\"])\n            item = {\"pk\": \"environment-check\", \"checked_at\": datetime.now(timezone.utc).isoformat(), \"request_id\": request_id}\n            table.put_item(Item=item)\n            saved = table.get_item(Key={\"pk\": item[\"pk\"]}, ConsistentRead=True).get(\"Item\")\n            if saved != item:\n                raise RuntimeError(\"Storage verification mismatch\")\n            body.update(storage=\"ok\", write=\"ok\", read=\"ok\", item=saved)\n        except Exception:\n            logger.exception(\"Storage check failed request_id=%s\", request_id)\n            status, body = 503, {\"status\": \"error\", \"storage\": \"unavailable\", \"request_id\": request_id}\n    body[\"request_id\"] = request_id\n    logger.info(json.dumps({\"request_id\": request_id, \"path\": path, \"status\": status}))\n    return {\"statusCode\": status, \"headers\": {\"Content-Type\": \"application/json; charset=utf-8\", \"Cache-Control\": \"no-store\"}, \"body\": json.dumps(body, ensure_ascii=False)}\n"
+          "ZipFile": "\"\"\"Course assignment: Lambda health and DynamoDB integration checks.\"\"\"\nimport json\nimport logging\nimport os\nfrom datetime import datetime, timezone\n\nlogger = logging.getLogger()\nlogger.setLevel(logging.INFO)\n\n\ndef handler(event, context):\n    if event.get(\"action\") == \"model_access_check\":\n        import boto3\n        globals()[\"boto3\"] = boto3\n        return check_models()\n    method = event.get(\"requestContext\", {}).get(\"http\", {}).get(\"method\", \"GET\")\n    path = event.get(\"rawPath\", \"/health\")\n    stage = event.get(\"requestContext\", {}).get(\"stage\", \"\")\n    if stage and stage != \"$default\" and path.startswith(\"/\" + stage + \"/\"):\n        path = path[len(stage) + 1:]\n    request_id = getattr(context, \"aws_request_id\", \"local\")\n    status = 200\n    body = {\"status\": \"ok\", \"service\": \"aws-environment-app\", \"developer_tool\": \"Codex\"}\n    if method == \"GET\" and path == \"/api/environment\":\n        try:\n            import boto3\n            globals()[\"boto3\"] = boto3\n            body = check_environment()\n        except Exception:\n            logger.exception(\"Environment check failed request_id=%s\", request_id)\n            status, body = 503, {\"status\": \"error\", \"message\": \"Environment check failed\", \"request_id\": request_id}\n    elif method != \"GET\" or path not in (\"/health\", \"/storage-check\"):\n        status, body = 404, {\"status\": \"error\", \"message\": \"Not found\"}\n    elif path == \"/storage-check\":\n        try:\n            import boto3\n            table = boto3.resource(\"dynamodb\").Table(os.environ[\"TABLE_NAME\"])\n            item = {\"pk\": \"environment-check\", \"checked_at\": datetime.now(timezone.utc).isoformat(), \"request_id\": request_id}\n            table.put_item(Item=item)\n            saved = table.get_item(Key={\"pk\": item[\"pk\"]}, ConsistentRead=True).get(\"Item\")\n            if saved != item:\n                raise RuntimeError(\"Storage verification mismatch\")\n            body.update(storage=\"ok\", write=\"ok\", read=\"ok\", item=saved)\n        except Exception:\n            logger.exception(\"Storage check failed request_id=%s\", request_id)\n            status, body = 503, {\"status\": \"error\", \"storage\": \"unavailable\", \"request_id\": request_id}\n    body[\"request_id\"] = request_id\n    logger.info(json.dumps({\"request_id\": request_id, \"path\": path, \"status\": status}))\n    return {\"statusCode\": status, \"headers\": {\"Content-Type\": \"application/json; charset=utf-8\", \"Cache-Control\": \"no-store\"}, \"body\": json.dumps(body, ensure_ascii=False)}\n\n\n\"\"\"Infrastructure smoke checks only. No document ingestion or chatbot logic.\"\"\"\nimport json\nimport os\n\n\ndef check_environment():\n    s3 = boto3.client(\"s3\")\n    locations = {}\n    for key in (\"WEB_BUCKET\", \"DATA_BUCKET\"):\n        locations[key.lower()] = {\n            \"name\": os.environ[key],\n            \"region\": s3.get_bucket_location(Bucket=os.environ[key])[\"LocationConstraint\"] or \"us-east-1\",\n            \"status\": \"accessible\",\n        }\n    client = boto3.client(\"s3vectors\")\n    index = client.get_index(indexArn=os.environ[\"VECTOR_INDEX_ARN\"])[\"index\"]\n    vectors = client.list_vectors(indexArn=os.environ[\"VECTOR_INDEX_ARN\"], maxResults=1)\n    return {\n        \"status\": \"ok\", \"scope\": \"development-environment-only\",\n        \"storage\": locations,\n        \"vector_index\": {\"name\": index[\"indexName\"], \"dimension\": index[\"dimension\"],\n                         \"distance_metric\": index[\"distanceMetric\"], \"empty\": not bool(vectors.get(\"vectors\"))},\n        \"embedding_model\": os.environ[\"EMBEDDING_MODEL\"],\n        \"generation_model\": os.environ[\"GENERATION_MODEL\"],\n        \"document_ingestion\": \"not_implemented\", \"chatbot\": \"not_implemented\",\n    }\n\n\ndef check_models():\n    client = boto3.client(\"bedrock-runtime\")\n    result = client.invoke_model(modelId=os.environ[\"EMBEDDING_MODEL\"],\n        body=json.dumps({\"inputText\": \"Development environment connectivity test\", \"dimensions\": 256, \"normalize\": True}))\n    embedding = json.loads(result[\"body\"].read())[\"embedding\"]\n    result = client.converse(modelId=os.environ[\"GENERATION_MODEL\"],\n        messages=[{\"role\": \"user\", \"content\": [{\"text\": \"Return only OK.\"}]}],\n        inferenceConfig={\"maxTokens\": 8, \"temperature\": 0})\n    return {\"status\": \"ok\", \"embedding_dimensions\": len(embedding),\n            \"generation_response\": result[\"output\"][\"message\"][\"content\"],\n            \"usage\": result.get(\"usage\", {})}\n"
         }
       }
     },
@@ -186,7 +254,8 @@
       "Type": "AWS::ApiGatewayV2::Stage",
       "DependsOn": [
         "HealthRoute",
-        "StorageRoute"
+        "StorageRoute",
+        "EnvironmentRoute"
       ],
       "Properties": {
         "ApiId": {
@@ -210,6 +279,262 @@
         "Principal": "apigateway.amazonaws.com",
         "SourceArn": {
           "Fn::Sub": "arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${Api}/dev/GET/*"
+        }
+      }
+    },
+    "WebBucket": {
+      "Type": "AWS::S3::Bucket",
+      "Properties": {
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "BlockPublicPolicy": true,
+          "IgnorePublicAcls": true,
+          "RestrictPublicBuckets": true
+        },
+        "BucketEncryption": {
+          "ServerSideEncryptionConfiguration": [
+            {
+              "ServerSideEncryptionByDefault": {
+                "SSEAlgorithm": "AES256"
+              }
+            }
+          ]
+        },
+        "OwnershipControls": {
+          "Rules": [
+            {
+              "ObjectOwnership": "BucketOwnerEnforced"
+            }
+          ]
+        },
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "book-rag-environment"
+          },
+          {
+            "Key": "Environment",
+            "Value": "dev"
+          }
+        ]
+      }
+    },
+    "DataBucket": {
+      "Type": "AWS::S3::Bucket",
+      "Properties": {
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "BlockPublicPolicy": true,
+          "IgnorePublicAcls": true,
+          "RestrictPublicBuckets": true
+        },
+        "BucketEncryption": {
+          "ServerSideEncryptionConfiguration": [
+            {
+              "ServerSideEncryptionByDefault": {
+                "SSEAlgorithm": "AES256"
+              }
+            }
+          ]
+        },
+        "OwnershipControls": {
+          "Rules": [
+            {
+              "ObjectOwnership": "BucketOwnerEnforced"
+            }
+          ]
+        },
+        "Tags": [
+          {
+            "Key": "Project",
+            "Value": "book-rag-environment"
+          },
+          {
+            "Key": "Environment",
+            "Value": "dev"
+          }
+        ]
+      }
+    },
+    "VectorBucket": {
+      "Type": "AWS::S3Vectors::VectorBucket",
+      "Properties": {
+        "VectorBucketName": "rag-books-vectors-20261125"
+      }
+    },
+    "VectorIndex": {
+      "Type": "AWS::S3Vectors::Index",
+      "Properties": {
+        "VectorBucketArn": {
+          "Ref": "VectorBucket"
+        },
+        "IndexName": "book-descriptions",
+        "DataType": "float32",
+        "Dimension": 256,
+        "DistanceMetric": "cosine",
+        "MetadataConfiguration": {
+          "NonFilterableMetadataKeys": [
+            "title",
+            "author",
+            "description",
+            "source_url"
+          ]
+        }
+      }
+    },
+    "OriginAccessControl": {
+      "Type": "AWS::CloudFront::OriginAccessControl",
+      "Properties": {
+        "OriginAccessControlConfig": {
+          "Name": {
+            "Fn::Sub": "${AWS::StackName}-web-oac"
+          },
+          "OriginAccessControlOriginType": "s3",
+          "SigningBehavior": "always",
+          "SigningProtocol": "sigv4"
+        }
+      }
+    },
+    "Distribution": {
+      "Type": "AWS::CloudFront::Distribution",
+      "Properties": {
+        "DistributionConfig": {
+          "Enabled": true,
+          "Comment": "Book RAG development environment only",
+          "DefaultRootObject": "index.html",
+          "PriceClass": "PriceClass_100",
+          "HttpVersion": "http2",
+          "Origins": [
+            {
+              "Id": "private-web",
+              "DomainName": {
+                "Fn::GetAtt": [
+                  "WebBucket",
+                  "RegionalDomainName"
+                ]
+              },
+              "OriginAccessControlId": {
+                "Ref": "OriginAccessControl"
+              },
+              "S3OriginConfig": {
+                "OriginAccessIdentity": ""
+              }
+            },
+            {
+              "Id": "environment-api",
+              "DomainName": {
+                "Fn::Sub": "${Api}.execute-api.${AWS::Region}.${AWS::URLSuffix}"
+              },
+              "OriginPath": "/dev",
+              "CustomOriginConfig": {
+                "OriginProtocolPolicy": "https-only",
+                "OriginSSLProtocols": [
+                  "TLSv1.2"
+                ]
+              }
+            }
+          ],
+          "DefaultCacheBehavior": {
+            "TargetOriginId": "private-web",
+            "ViewerProtocolPolicy": "redirect-to-https",
+            "AllowedMethods": [
+              "GET",
+              "HEAD"
+            ],
+            "CachedMethods": [
+              "GET",
+              "HEAD"
+            ],
+            "Compress": true,
+            "MinTTL": 0,
+            "DefaultTTL": 60,
+            "MaxTTL": 300,
+            "ForwardedValues": {
+              "QueryString": false,
+              "Cookies": {
+                "Forward": "none"
+              }
+            }
+          },
+          "CacheBehaviors": [
+            {
+              "PathPattern": "api/*",
+              "TargetOriginId": "environment-api",
+              "ViewerProtocolPolicy": "https-only",
+              "AllowedMethods": [
+                "GET",
+                "HEAD",
+                "OPTIONS"
+              ],
+              "CachedMethods": [
+                "GET",
+                "HEAD"
+              ],
+              "Compress": true,
+              "MinTTL": 0,
+              "DefaultTTL": 0,
+              "MaxTTL": 0,
+              "ForwardedValues": {
+                "QueryString": false,
+                "Cookies": {
+                  "Forward": "none"
+                }
+              }
+            }
+          ],
+          "ViewerCertificate": {
+            "CloudFrontDefaultCertificate": true
+          }
+        }
+      }
+    },
+    "WebBucketPolicy": {
+      "Type": "AWS::S3::BucketPolicy",
+      "Properties": {
+        "Bucket": {
+          "Ref": "WebBucket"
+        },
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "cloudfront.amazonaws.com"
+              },
+              "Action": "s3:GetObject",
+              "Resource": {
+                "Fn::Sub": "${WebBucket.Arn}/*"
+              },
+              "Condition": {
+                "StringEquals": {
+                  "AWS:SourceArn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${Distribution}"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "EnvironmentRoute": {
+      "Type": "AWS::ApiGatewayV2::Route",
+      "Properties": {
+        "ApiId": {
+          "Ref": "Api"
+        },
+        "RouteKey": "GET /api/environment",
+        "Target": {
+          "Fn::Join": [
+            "/",
+            [
+              "integrations",
+              {
+                "Ref": "Integration"
+              }
+            ]
+          ]
         }
       }
     }
@@ -243,6 +568,44 @@
     "LogGroupName": {
       "Value": {
         "Ref": "LogGroup"
+      }
+    },
+    "WebBucketName": {
+      "Value": {
+        "Ref": "WebBucket"
+      }
+    },
+    "DataBucketName": {
+      "Value": {
+        "Ref": "DataBucket"
+      }
+    },
+    "VectorBucketName": {
+      "Value": "rag-books-vectors-20261125"
+    },
+    "VectorIndexArn": {
+      "Value": {
+        "Ref": "VectorIndex"
+      }
+    },
+    "DistributionId": {
+      "Value": {
+        "Ref": "Distribution"
+      }
+    },
+    "WebsiteUrl": {
+      "Value": {
+        "Fn::Sub": "https://${Distribution.DomainName}"
+      }
+    },
+    "EnvironmentUrl": {
+      "Value": {
+        "Fn::Sub": "https://${Distribution.DomainName}/api/environment"
+      }
+    },
+    "ExecutionRoleName": {
+      "Value": {
+        "Ref": "ExecutionRole"
       }
     }
   }

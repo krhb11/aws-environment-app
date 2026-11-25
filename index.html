@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>도서 추천 RAG 개발 환경</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f5f7fa;color:#172b40;font-family:system-ui,"Malgun Gothic",sans-serif}
+main{max-width:900px;margin:56px auto;padding:32px;background:white;border:1px solid #dde3e9;border-radius:12px}
+h1{font-size:30px;margin:10px 0 18px}p{line-height:1.7}.tag{font-size:13px;color:#526879}
+table{border-collapse:collapse;width:100%;margin:26px 0}th,td{padding:13px 15px;text-align:left;border:1px solid #e0e5eb}th{background:#edf3f8}
+button{font:inherit;background:#174e79;border:0;border-radius:6px;color:white;padding:12px 20px;cursor:pointer}button:disabled{opacity:.6}
+pre{font:13px/1.65 Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere;background:#f3f6f9;padding:20px;border-radius:6px}
+.ok{color:#15653b}.small{font-size:13px;color:#5b6d7b}@media(max-width:700px){main{margin:16px;padding:20px}h1{font-size:24px}}
+</style>
+<main><div class="tag">CLOUD ARCHITECTURE · DEVELOPMENT ENVIRONMENT</div>
+<h1>도서 추천 RAG 개발 환경</h1>
+<p>기획서에 필요한 AWS 실행 환경과 저장소를 준비했습니다.<br>이 페이지는 인프라의 기본 연결을 확인하는 테스트 화면입니다.</p>
+<table><tr><th>구성 요소</th><th>개발 환경</th></tr>
+<tr><td>웹 배포</td><td>Amazon CloudFront + 비공개 S3</td></tr>
+<tr><td>백엔드</td><td>Amazon API Gateway + AWS Lambda</td></tr>
+<tr><td>도서 원본 저장소</td><td>비공개 S3 버킷</td></tr>
+<tr><td>벡터 저장소</td><td>Amazon S3 Vectors · 256차원 · cosine</td></tr>
+<tr><td>모델 접근 설정</td><td>Amazon Bedrock · Titan Embeddings V2 / Nova Micro</td></tr>
+<tr><td>개발 및 소스 관리</td><td>Codex · GitHub</td></tr></table>
+<button id="check">기본 환경 연결 확인</button><p id="status" role="status">확인 버튼을 누르면 백엔드와 저장소 연결을 검사합니다.</p><pre id="result" hidden></pre>
+<p class="small">도서 수집, 임베딩 데이터 적재, 검색·추천 기능은 아직 구현하지 않았습니다. 벡터 인덱스는 비어 있는 개발 준비 상태입니다.</p></main>
+<script>
+const button=document.querySelector('#check'),status=document.querySelector('#status'),result=document.querySelector('#result');
+button.addEventListener('click',async()=>{button.disabled=true;status.textContent='연결 확인 중…';try{const r=await fetch('/api/environment',{cache:'no-store'});const data=await r.json();if(!r.ok)throw Error(data.message||'연결 확인 실패');status.textContent='HTTP '+r.status+' · 기본 환경 연결 정상';status.className='ok';result.hidden=false;result.textContent=JSON.stringify(data,null,2);}catch(e){status.textContent='오류: '+e.message;status.className='';}finally{button.disabled=false;}});
+</script></html>
